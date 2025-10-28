@@ -31,7 +31,7 @@ For Django:
 """
 
 __version__ = '1.0.0'
-__author__ = 'Your Name'
+__author__ = 'Võ Thiên Hòa'
 
 # Core components
 from .core import PostgresBackupEngine, CopyToStreamWrapper, QueryBuilder
