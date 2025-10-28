@@ -1,0 +1,41 @@
+# MANIFEST.in - Include additional files in source distribution
+
+# Documentation
+include README.md
+include LICENSE
+include CHANGELOG.md
+include INSTALL.md
+include PLUGIN_SUMMARY.md
+include PYPI_PUBLISHING.md
+
+# Requirements
+include requirements.txt
+include requirements-dev.txt
+
+# Configuration
+include setup.py
+include pyproject.toml
+
+# Include examples directory
+recursive-include examples *.py
+recursive-include examples *.md
+
+# Include test data if any
+recursive-include tests *.py
+
+# Exclude unwanted files
+global-exclude __pycache__
+global-exclude *.py[co]
+global-exclude *.so
+global-exclude .DS_Store
+global-exclude *.swp
+global-exclude *~
+global-exclude .git*
+global-exclude .coverage
+global-exclude .pytest_cache
+global-exclude *.egg-info
+
+# Exclude build directories
+prune build
+prune dist
+prune .eggs

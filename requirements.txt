@@ -1,0 +1,8 @@
+# Core requirements
+psycopg2-binary>=2.8.0
+
+# Optional: S3 support
+boto3>=1.20.0
+
+# Optional: Django integration
+django>=3.0
