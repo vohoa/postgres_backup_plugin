@@ -28,13 +28,17 @@ class CopyToStreamWrapper:
         Called by psycopg2 cursor.copy_expert() to write streamed data
 
         Args:
-            data: Data chunk from PostgreSQL COPY TO
+            data: Data chunk from PostgreSQL COPY TO (bytes or str)
 
         Returns:
             int: Number of bytes written
         """
+        # psycopg2 may return bytes, convert to str if needed
+        if isinstance(data, bytes):
+            data = data.decode('utf-8')
+
         self.outfile.write(data)
-        bytes_count = len(data)
+        bytes_count = len(data.encode('utf-8')) if isinstance(data, str) else len(data)
         self.bytes_written += bytes_count
         self.chunks_written += 1
         return bytes_count

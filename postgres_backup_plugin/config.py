@@ -68,6 +68,10 @@ class BackupConfig:
     include_metadata: bool = True
     verbose_logging: bool = True
 
+    # SQL Cleaning options
+    clean_output: bool = True  # Clean SQL output (remove schema prefix, psql commands, etc.)
+    target_schema: Optional[str] = None  # Target schema for cleaned output (if None, uses original schema)
+
 
 @dataclass
 class BackupResult:
