@@ -30,7 +30,7 @@ For Django:
     result = engine.backup('/tmp/backup.sql')
 """
 
-__version__ = '1.0.1'
+__version__ = '1.0.3'
 __author__ = 'Võ Thiên Hòa'
 
 # Core components

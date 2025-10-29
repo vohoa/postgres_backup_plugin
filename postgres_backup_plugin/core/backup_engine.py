@@ -63,7 +63,8 @@ class PostgresBackupEngine:
         return cls(db_config, backup_config, logger)
 
     def backup(self, output_path: str, filters: Optional[Dict[str, Any]] = None,
-               schema_name: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> BackupResult:
+               schema_name: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None,
+               source_schema: Optional[str] = 'public') -> BackupResult:
         """
         Create backup with optional filtering and automatic SQL cleaning
 
@@ -72,8 +73,9 @@ class PostgresBackupEngine:
             filters: Dictionary mapping table names to filter queries
                 Can be: {table_name: "SELECT ...", ...}
                 Or: {table_name: FilterQuery object, ...}
-            schema_name: Custom schema name for restore (optional)
+            schema_name: Custom schema name for restore (target schema, optional)
             metadata: Additional metadata to include in header
+            source_schema: Source schema to backup from (default: 'public')
 
         Returns:
             BackupResult object with statistics
@@ -82,6 +84,7 @@ class PostgresBackupEngine:
             - If backup_config.clean_output=True (default), the output SQL will be automatically
               cleaned to remove schema prefixes, psql meta-commands, and unnecessary SET statements
             - Use backup_config.target_schema to specify a custom target schema for cleaned output
+            - source_schema specifies which schema to backup FROM (default: 'public')
         """
         start_time = time.time()
         result = BackupResult(success=False)
@@ -116,7 +119,7 @@ class PostgresBackupEngine:
                 self.logger.debug(f"Creating temporary backup file: {temp_file}")
 
                 with open(temp_file, 'w', encoding=self.backup_config.encoding) as outfile:
-                    stats = self._write_backup(conn, outfile, filters, schema_name, metadata)
+                    stats = self._write_backup(conn, outfile, filters, schema_name, metadata, source_schema)
 
                 conn.close()
 
@@ -132,7 +135,7 @@ class PostgresBackupEngine:
             else:
                 # Direct write without cleaning
                 with open(output_path, 'w', encoding=self.backup_config.encoding) as outfile:
-                    stats = self._write_backup(conn, outfile, filters, schema_name, metadata)
+                    stats = self._write_backup(conn, outfile, filters, schema_name, metadata, source_schema)
 
                 conn.close()
 
@@ -264,7 +267,7 @@ class PostgresBackupEngine:
 
         return validation_results
 
-    def _write_backup(self, conn, outfile, filters, schema_name, metadata) -> Dict[str, Any]:
+    def _write_backup(self, conn, outfile, filters, schema_name, metadata, source_schema='public') -> Dict[str, Any]:
         """Write backup to file"""
         stats = {
             'tables_count': 0,
@@ -283,8 +286,8 @@ class PostgresBackupEngine:
         self._write_performance_settings(outfile)
 
         with conn.cursor() as cursor:
-            # Get all tables
-            tables = self._get_tables(cursor)
+            # Get all tables from source schema
+            tables = self._get_tables(cursor, source_schema)
 
             outfile.write("-- ========================================\n")
             outfile.write("-- TABLE STRUCTURES AND DATA\n")
@@ -298,7 +301,7 @@ class PostgresBackupEngine:
                     continue
 
                 try:
-                    table_stats = self._backup_table(cursor, outfile, table_name, filters)
+                    table_stats = self._backup_table(cursor, outfile, table_name, filters, source_schema)
                     stats['tables'][table_name] = table_stats
                     stats['total_rows'] += table_stats['rows']
                     stats['tables_count'] += 1
@@ -314,13 +317,13 @@ class PostgresBackupEngine:
 
         return stats
 
-    def _backup_table(self, cursor, outfile, table_name, filters) -> Dict[str, Any]:
+    def _backup_table(self, cursor, outfile, table_name, filters, source_schema='public') -> Dict[str, Any]:
         """Backup single table"""
         # Dump table structure
-        self._dump_table_structure(table_name, outfile)
+        self._dump_table_structure(table_name, outfile, source_schema)
 
         # Build query
-        query = self._build_query_for_table(table_name, filters)
+        query = self._build_query_for_table(table_name, filters, source_schema)
 
         # Get column names
         test_query = self.query_builder.get_column_structure(query)
@@ -377,19 +380,19 @@ class PostgresBackupEngine:
             'columns': len(column_names)
         }
 
-    def _get_tables(self, cursor) -> List[str]:
-        """Get all tables in public schema"""
-        query = self.query_builder.get_all_tables()
+    def _get_tables(self, cursor, schema='public') -> List[str]:
+        """Get all tables in specified schema"""
+        query = self.query_builder.get_all_tables(schema=schema)
         cursor.execute(query)
         return [row[0] for row in cursor.fetchall()]
 
-    def _build_query_for_table(self, table_name: str, filters: Optional[Dict[str, Any]]) -> str:
+    def _build_query_for_table(self, table_name: str, filters: Optional[Dict[str, Any]], schema='public') -> str:
         """Build SELECT query for table with optional filter"""
         if filters and table_name in filters:
             filter_query = filters[table_name]
             return self._resolve_filter_query(table_name, filter_query)
         else:
-            return self.query_builder.build_select_all(table_name)
+            return self.query_builder.build_select_all(table_name, schema=schema)
 
     def _resolve_filter_query(self, table_name: str, filter_query: Any) -> str:
         """Resolve filter query (string or FilterQuery object)"""
@@ -403,7 +406,7 @@ class PostgresBackupEngine:
                 f"Invalid filter for table {table_name}: must be string or FilterQuery object"
             )
 
-    def _dump_table_structure(self, table_name: str, outfile):
+    def _dump_table_structure(self, table_name: str, outfile, schema='public'):
         """Dump table structure using pg_dump"""
         try:
             env = os.environ.copy()
@@ -418,7 +421,7 @@ class PostgresBackupEngine:
                 '--schema-only',
                 '--no-owner',
                 '--no-privileges',
-                '--table', f'public.{table_name}'
+                '--table', f'{schema}.{table_name}'
             ]
 
             result = subprocess.run(
