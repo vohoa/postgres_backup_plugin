@@ -46,20 +46,26 @@ class PostgresBackupEngine:
     @classmethod
     def from_django_settings(cls, excluded_tables: Optional[List[str]] = None,
                             logger: Optional[logging.Logger] = None,
-                            settings_module=None):
+                            settings_module=None,
+                            backup_config: Optional[BackupConfig] = None):
         """
         Create engine from Django settings
 
         Args:
-            excluded_tables: Tables to exclude from backup
+            excluded_tables: Tables to exclude from backup (ignored if backup_config provided)
             logger: Optional logger
             settings_module: Django settings module (uses django.conf.settings if None)
+            backup_config: Optional custom backup configuration
 
         Returns:
             PostgresBackupEngine instance
         """
         db_config = DatabaseConfig.from_django_settings(settings_module)
-        backup_config = BackupConfig(excluded_tables=excluded_tables or [])
+
+        # Use provided backup_config or create default
+        if backup_config is None:
+            backup_config = BackupConfig(excluded_tables=excluded_tables or [])
+
         return cls(db_config, backup_config, logger)
 
     def backup(self, output_path: str, filters: Optional[Dict[str, Any]] = None,
@@ -125,7 +131,7 @@ class PostgresBackupEngine:
 
                 # Clean the SQL file
                 self.logger.info("Cleaning SQL output...")
-                self._clean_backup_file(temp_file, output_path, schema_name)
+                self._clean_backup_file(temp_file, output_path, schema_name, source_schema)
 
                 # Clean up temp file
                 if os.path.exists(temp_file):
@@ -520,7 +526,7 @@ class PostgresBackupEngine:
         outfile.write(f"-- Backup completed: {datetime.datetime.now().isoformat()}\n")
 
     def _clean_backup_file(self, input_file: str, output_file: str,
-                          schema_name: Optional[str] = None) -> None:
+                          schema_name: Optional[str] = None, source_schema: str = 'public') -> None:
         """
         Clean a backup SQL file by removing schema prefixes and psql commands
 
@@ -528,6 +534,7 @@ class PostgresBackupEngine:
             input_file: Input SQL file to clean
             output_file: Output cleaned SQL file
             schema_name: Optional target schema name
+            source_schema: Source schema to remove prefix from (default: 'public')
 
         Raises:
             BackupCreationError: If cleaning fails
@@ -541,7 +548,8 @@ class PostgresBackupEngine:
                 content = f.read()
 
             # Clean the content
-            cleaned_content = self._clean_sql_content(content, remove_schema_prefix=True)
+            cleaned_content = self._clean_sql_content(content, remove_schema_prefix=True,
+                                                     source_schema=source_schema)
 
             # Write cleaned content
             with open(output_file, 'w', encoding='utf-8') as f:
@@ -565,171 +573,15 @@ class PostgresBackupEngine:
             self.logger.error(error_msg, exc_info=True)
             raise BackupCreationError(error_msg) from e
 
-    def _create_clean_sql_file(self, schema_file: str, data_file: str,
-                               output_file: str, target_schema: str) -> None:
-        """
-        Create clean SQL file by combining schema and data files,
-        removing schema prefix and adding target schema
-
-        Args:
-            schema_file: File containing schema backup
-            data_file: File containing data backup
-            output_file: Final output file
-            target_schema: Target schema (e.g.: as_123)
-
-        Raises:
-            ValueError: If target_schema is invalid or files don't exist
-            IOError: If file operations fail
-            BackupCreationError: If backup creation fails
-        """
-        # Validate target schema name
-        import re
-        if not target_schema or not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', target_schema):
-            raise ValueError(f"Invalid target schema name: {target_schema}")
-
-        # Validate input files exist (at least one should exist)
-        schema_exists = os.path.exists(schema_file)
-        data_exists = os.path.exists(data_file)
-
-        if not schema_exists and not data_exists:
-            raise ValueError(
-                f"Both schema and data files are missing: {schema_file}, {data_file}"
-            )
-
-        try:
-            # Ensure output directory exists
-            output_dir = os.path.dirname(output_file)
-            if output_dir:
-                os.makedirs(output_dir, exist_ok=True)
-
-            with open(output_file, 'w', encoding='utf-8') as output:
-                # Header comments
-                output.write(f"-- Database backup for schema: {target_schema}\n")
-                output.write(f"-- Generated: {datetime.datetime.now().isoformat()}\n")
-                output.write(f"-- Schema prefix removed for portability\n")
-                output.write(f"-- Original schema: public -> {target_schema}\n\n")
-
-                # Create target schema
-                output.write(f"-- ========================================\n")
-                output.write(f"-- SCHEMA SETUP\n")
-                output.write(f"-- ========================================\n\n")
-                output.write(f"-- Create target schema\n")
-                output.write(f"DROP SCHEMA IF EXISTS {target_schema} CASCADE;\n")
-                output.write(f"CREATE SCHEMA {target_schema};\n\n")
-                output.write(f"-- Set search path to target schema\n")
-                output.write(f"SET search_path = {target_schema}, public;\n\n")
-
-                # Disable triggers and constraints for faster restore
-                output.write(f"-- Disable triggers for faster restore\n")
-                output.write(f"SET session_replication_role = replica;\n\n")
-
-                # Process schema file (table structure)
-                output.write("-- ========================================\n")
-                output.write("-- TABLE STRUCTURES\n")
-                output.write("-- ========================================\n\n")
-
-                if schema_exists:
-                    try:
-                        with open(schema_file, 'r', encoding='utf-8') as f:
-                            schema_content = f.read()
-
-                        # Clean schema content
-                        cleaned_schema = self._clean_sql_content(
-                            schema_content,
-                            remove_schema_prefix=True
-                        )
-                        if cleaned_schema.strip():
-                            output.write(cleaned_schema)
-                            output.write("\n\n")
-                        else:
-                            output.write("-- Schema file is empty after cleaning\n\n")
-
-                    except UnicodeDecodeError as e:
-                        self.logger.warning(
-                            f"Encoding error reading schema file {schema_file}: {e}"
-                        )
-                        output.write(f"-- ERROR: Could not read schema file (encoding issue)\n\n")
-                else:
-                    output.write("-- No schema file found\n\n")
-
-                # Process data file
-                output.write("-- ========================================\n")
-                output.write("-- DATA INSERTS\n")
-                output.write("-- ========================================\n\n")
-
-                if data_exists:
-                    try:
-                        with open(data_file, 'r', encoding='utf-8') as f:
-                            data_content = f.read()
-
-                        # Clean data content
-                        cleaned_data = self._clean_sql_content(
-                            data_content,
-                            remove_schema_prefix=True
-                        )
-                        if cleaned_data.strip():
-                            output.write(cleaned_data)
-                            output.write("\n\n")
-                        else:
-                            output.write("-- Data file is empty after cleaning\n\n")
-
-                    except UnicodeDecodeError as e:
-                        self.logger.warning(
-                            f"Encoding error reading data file {data_file}: {e}"
-                        )
-                        output.write(f"-- ERROR: Could not read data file (encoding issue)\n\n")
-                else:
-                    output.write("-- No data file found\n\n")
-
-                # Re-enable triggers and constraints
-                output.write("-- ========================================\n")
-                output.write("-- FINALIZATION\n")
-                output.write("-- ========================================\n\n")
-                output.write("-- Re-enable triggers\n")
-                output.write("SET session_replication_role = DEFAULT;\n\n")
-
-                # Analyze tables for better performance
-                output.write("-- Analyze tables for performance\n")
-                output.write("ANALYZE;\n\n")
-
-                # Footer
-                output.write("-- ========================================\n")
-                output.write("-- RESTORE COMPLETED\n")
-                output.write("-- ========================================\n")
-                output.write(f"-- Target schema: {target_schema}\n")
-                output.write(f"-- Completion time: {datetime.datetime.now().isoformat()}\n")
-                output.write(f"-- \n")
-                output.write(f"-- To use this schema:\n")
-                output.write(f"-- SET search_path = {target_schema}, public;\n")
-                output.write(f"-- \\dt {target_schema}.*\n")
-
-            # Verify output file was created
-            if not os.path.exists(output_file):
-                raise BackupCreationError(f"Output file was not created: {output_file}")
-
-            file_size = os.path.getsize(output_file)
-            self.logger.info(
-                f"Clean SQL file created successfully: {output_file} "
-                f"({file_size} bytes, target schema: {target_schema})"
-            )
-
-        except (IOError, OSError) as e:
-            error_msg = f"File I/O error creating clean SQL file: {str(e)}"
-            self.logger.error(error_msg)
-            raise BackupCreationError(error_msg) from e
-
-        except Exception as e:
-            error_msg = f"Failed to create clean SQL file: {str(e)}"
-            self.logger.error(error_msg, exc_info=True)
-            raise BackupCreationError(error_msg) from e
-
-    def _clean_sql_content(self, content: str, remove_schema_prefix: bool = True) -> str:
+    def _clean_sql_content(self, content: str, remove_schema_prefix: bool = True,
+                          source_schema: str = 'public') -> str:
         """
         Clean SQL content by removing schema prefix and unnecessary commands
 
         Args:
             content: Original SQL content
             remove_schema_prefix: Whether to remove schema prefix
+            source_schema: Source schema name to remove (default: 'public')
 
         Returns:
             Cleaned SQL content
@@ -744,6 +596,9 @@ class PostgresBackupEngine:
             return ""
 
         import re
+
+        # Escape special regex characters in schema name
+        escaped_schema = re.escape(source_schema)
 
         # Split into lines for processing
         lines = content.split('\n')
@@ -770,8 +625,8 @@ class PostgresBackupEngine:
             r'^SET\s+transaction_timeout',  # Remove unsupported transaction_timeout
             r'^SET\s+idle_in_transaction_session_timeout',  # Session timeout
             r'^SET\s+client_encoding',  # Client encoding (already handled)
-            r'^\s*CREATE\s+SCHEMA\s+public\s*;',  # Remove CREATE SCHEMA public;
-            r'^\s*COMMENT\s+ON\s+SCHEMA\s+public',  # Comments on public schema
+            rf'^\s*CREATE\s+SCHEMA\s+{escaped_schema}\s*;',  # Remove CREATE SCHEMA {source_schema};
+            rf'^\s*COMMENT\s+ON\s+SCHEMA\s+{escaped_schema}',  # Comments on source schema
         ]
 
         # Compile patterns once for better performance
@@ -789,7 +644,7 @@ class PostgresBackupEngine:
                 # Process COPY line (remove schema prefix)
                 if remove_schema_prefix:
                     line = re.sub(
-                        r'\bCOPY\s+public\.([a-zA-Z_][a-zA-Z0-9_]*)',
+                        rf'\bCOPY\s+{escaped_schema}\.([a-zA-Z_][a-zA-Z0-9_]*)',
                         r'COPY \1',
                         line,
                         flags=re.IGNORECASE
@@ -818,7 +673,7 @@ class PostgresBackupEngine:
             if remove_schema_prefix:
                 # 1. CREATE TABLE statements
                 line = re.sub(
-                    r'\bCREATE\s+TABLE\s+public\.([a-zA-Z_][a-zA-Z0-9_]*)',
+                    rf'\bCREATE\s+TABLE\s+{escaped_schema}\.([a-zA-Z_][a-zA-Z0-9_]*)',
                     r'CREATE TABLE \1',
                     line,
                     flags=re.IGNORECASE
@@ -826,7 +681,7 @@ class PostgresBackupEngine:
 
                 # 2. INSERT INTO statements
                 line = re.sub(
-                    r'\bINSERT\s+INTO\s+public\.([a-zA-Z_][a-zA-Z0-9_]*)',
+                    rf'\bINSERT\s+INTO\s+{escaped_schema}\.([a-zA-Z_][a-zA-Z0-9_]*)',
                     r'INSERT INTO \1',
                     line,
                     flags=re.IGNORECASE
@@ -834,7 +689,7 @@ class PostgresBackupEngine:
 
                 # 3. ALTER TABLE statements
                 line = re.sub(
-                    r'\bALTER\s+TABLE\s+(?:ONLY\s+)?public\.([a-zA-Z_][a-zA-Z0-9_]*)',
+                    rf'\bALTER\s+TABLE\s+(?:ONLY\s+)?{escaped_schema}\.([a-zA-Z_][a-zA-Z0-9_]*)',
                     r'ALTER TABLE \1',
                     line,
                     flags=re.IGNORECASE
@@ -842,7 +697,7 @@ class PostgresBackupEngine:
 
                 # 4. CREATE INDEX statements
                 line = re.sub(
-                    r'\bCREATE\s+(UNIQUE\s+)?INDEX\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+ON\s+public\.([a-zA-Z_][a-zA-Z0-9_]*)',
+                    rf'\bCREATE\s+(UNIQUE\s+)?INDEX\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+ON\s+{escaped_schema}\.([a-zA-Z_][a-zA-Z0-9_]*)',
                     r'CREATE \1INDEX \2 ON \3',
                     line,
                     flags=re.IGNORECASE
@@ -850,7 +705,7 @@ class PostgresBackupEngine:
 
                 # 5. CREATE SEQUENCE statements
                 line = re.sub(
-                    r'\bCREATE\s+SEQUENCE\s+public\.([a-zA-Z_][a-zA-Z0-9_]*)',
+                    rf'\bCREATE\s+SEQUENCE\s+{escaped_schema}\.([a-zA-Z_][a-zA-Z0-9_]*)',
                     r'CREATE SEQUENCE \1',
                     line,
                     flags=re.IGNORECASE
@@ -858,7 +713,7 @@ class PostgresBackupEngine:
 
                 # 6. ALTER SEQUENCE statements
                 line = re.sub(
-                    r'\bALTER\s+SEQUENCE\s+public\.([a-zA-Z_][a-zA-Z0-9_]*)',
+                    rf'\bALTER\s+SEQUENCE\s+{escaped_schema}\.([a-zA-Z_][a-zA-Z0-9_]*)',
                     r'ALTER SEQUENCE \1',
                     line,
                     flags=re.IGNORECASE
@@ -866,7 +721,7 @@ class PostgresBackupEngine:
 
                 # 7. COPY statements
                 line = re.sub(
-                    r'\bCOPY\s+public\.([a-zA-Z_][a-zA-Z0-9_]*)',
+                    rf'\bCOPY\s+{escaped_schema}\.([a-zA-Z_][a-zA-Z0-9_]*)',
                     r'COPY \1',
                     line,
                     flags=re.IGNORECASE
@@ -874,7 +729,7 @@ class PostgresBackupEngine:
 
                 # 8. Foreign key references
                 line = re.sub(
-                    r'\bREFERENCES\s+public\.([a-zA-Z_][a-zA-Z0-9_]*)',
+                    rf'\bREFERENCES\s+{escaped_schema}\.([a-zA-Z_][a-zA-Z0-9_]*)',
                     r'REFERENCES \1',
                     line,
                     flags=re.IGNORECASE
@@ -882,7 +737,7 @@ class PostgresBackupEngine:
 
                 # 9. SELECT setval calls for sequences
                 line = re.sub(
-                    r"\bSELECT\s+pg_catalog\.setval\('public\.([a-zA-Z_][a-zA-Z0-9_]*)'",
+                    rf"\bSELECT\s+pg_catalog\.setval\('{escaped_schema}\.([a-zA-Z_][a-zA-Z0-9_]*)'",
                     r"SELECT pg_catalog.setval('\1'",
                     line,
                     flags=re.IGNORECASE
@@ -890,7 +745,7 @@ class PostgresBackupEngine:
 
                 # 10. DROP TABLE/SEQUENCE statements
                 line = re.sub(
-                    r'\bDROP\s+(TABLE|SEQUENCE)\s+(?:IF\s+EXISTS\s+)?public\.([a-zA-Z_][a-zA-Z0-9_]*)',
+                    rf'\bDROP\s+(TABLE|SEQUENCE)\s+(?:IF\s+EXISTS\s+)?{escaped_schema}\.([a-zA-Z_][a-zA-Z0-9_]*)',
                     r'DROP \1 IF EXISTS \2',
                     line,
                     flags=re.IGNORECASE
@@ -898,7 +753,7 @@ class PostgresBackupEngine:
 
                 # 11. GRANT/REVOKE statements
                 line = re.sub(
-                    r'\b(GRANT|REVOKE)\s+(.+?)\s+ON\s+(?:TABLE\s+)?public\.([a-zA-Z_][a-zA-Z0-9_]*)',
+                    rf'\b(GRANT|REVOKE)\s+(.+?)\s+ON\s+(?:TABLE\s+)?{escaped_schema}\.([a-zA-Z_][a-zA-Z0-9_]*)',
                     r'\1 \2 ON \3',
                     line,
                     flags=re.IGNORECASE
@@ -906,15 +761,15 @@ class PostgresBackupEngine:
 
                 # 12. TRIGGER statements
                 line = re.sub(
-                    r'\bON\s+public\.([a-zA-Z_][a-zA-Z0-9_]*)\s+FOR\s+EACH',
+                    rf'\bON\s+{escaped_schema}\.([a-zA-Z_][a-zA-Z0-9_]*)\s+FOR\s+EACH',
                     r'ON \1 FOR EACH',
                     line,
                     flags=re.IGNORECASE
                 )
 
-                # 13. General public. prefix removal (catch-all)
-                # Use word boundary to avoid matching 'public' in strings
-                line = re.sub(r'\bpublic\.([a-zA-Z_][a-zA-Z0-9_]*)', r'\1', line)
+                # 13. General schema prefix removal (catch-all)
+                # Use word boundary to avoid matching schema name in strings
+                line = re.sub(rf'\b{escaped_schema}\.([a-zA-Z_][a-zA-Z0-9_]*)', r'\1', line)
 
             # Only add line if not empty after processing
             if line.strip():

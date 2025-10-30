@@ -129,22 +129,27 @@ if result.success:
 
 ## Advanced Usage
 
-### Multi-Schema Backup
+### Multi-Schema Backup with Automatic Prefix Removal
 
-Backup from any schema, not just the default 'public' schema:
+Backup from any schema and automatically remove schema prefixes for clean, portable SQL:
 
 ```python
-from postgres_backup_plugin import PostgresBackupEngine, DatabaseConfig
+from postgres_backup_plugin import PostgresBackupEngine, BackupConfig
 
-engine = PostgresBackupEngine.from_django_settings()
+# Configure automatic cleaning
+backup_config = BackupConfig(
+    clean_output=True,  # Enable automatic SQL cleaning
+    target_schema='new_schema'  # Target schema for restore
+)
 
-# Backup from 'public' schema (default)
-result = engine.backup('/tmp/backup_public.sql')
+engine = PostgresBackupEngine.from_django_settings(backup_config=backup_config)
 
-# Backup from a specific schema
+# Backup from 'as_59' schema, remove all 'as_59.' prefixes
 result = engine.backup(
-    output_path='/tmp/backup_production.sql',
-    source_schema='production'  # Backup from 'production' schema
+    output_path='/tmp/backup_cleaned.sql',
+    source_schema='as_59',  # Backup FROM this schema
+    schema_name='new_schema',  # Restore TO this schema
+    metadata={'source': 'as_59', 'target': 'new_schema'}
 )
 
 # Backup from one schema and restore to another
@@ -180,7 +185,9 @@ result = engine.backup('/tmp/clean_backup.sql')
 ```
 
 **What gets cleaned:**
-- ✅ Schema prefixes (e.g., `public.users` → `users`)
+- ✅ **Source schema prefixes** (e.g., `as_59.users` → `users`, `public.orders` → `orders`)
+  - Works with ANY source schema, not just 'public'
+  - Removes prefix from CREATE TABLE, ALTER TABLE, COPY, REFERENCES, etc.
 - ✅ Psql meta-commands (`\restrict`, `\unrestrict`, `\connect`, etc.)
 - ✅ Unnecessary SET commands
 - ✅ Empty lines and comments (optional)
@@ -188,9 +195,10 @@ result = engine.backup('/tmp/clean_backup.sql')
 
 **Benefits:**
 - Clean, portable SQL files
-- Easy to restore to any schema
+- Easy to restore to any schema (schema-independent backups)
 - No psql-specific commands
 - Smaller file size
+- Perfect for schema migrations and multi-tenant applications
 
 **Disable cleaning if needed:**
 ```python
